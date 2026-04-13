@@ -16,7 +16,7 @@ let connections = []; // Utilisé par l'hôte pour stocker les clients
 let hostConnection; // Utilisé par le client pour parler à l'hôte
 let isHost = false;
 let myId = '';
-let players = {}; // { id: { name, color, isReady, body (Matter.js) } }
+let players = {}; // { id: { name, color, isReady, ragdoll: { composite, mainBody... } } }
 
 // Configurations
 const MAX_PLAYERS = 5;
@@ -27,7 +27,6 @@ joinBtn.addEventListener('click', () => {
     const roomID = document.getElementById('room-select').value;
     statusText.innerText = "Connexion...";
 
-    // 1. Tenter de se connecter en tant qu'invité
     peer = new Peer(); 
 
     peer.on('open', (id) => {
@@ -35,25 +34,23 @@ joinBtn.addEventListener('click', () => {
         hostConnection = peer.connect(roomID, { reliable: true });
 
         hostConnection.on('open', () => {
-            // Succès : La room existe, on est invité
             isHost = false;
             setupLobby(roomID, username);
             hostConnection.send({ type: 'JOIN', id: myId, name: username, color: '#ff0000' });
             listenToHost();
         });
 
-        // Si l'hôte n'existe pas, on attrape l'erreur et on devient hôte
         peer.on('error', (err) => {
             if (err.type === 'peer-unavailable') {
-                peer.destroy(); // Détruire le peer temporaire
-                initHost(roomID, username); // Créer le serveur avec l'ID de la room
+                peer.destroy(); 
+                initHost(roomID, username); 
             }
         });
     });
 });
 
 function initHost(roomID, username) {
-    peer = new Peer(roomID); // On force l'ID de la room
+    peer = new Peer(roomID); 
     peer.on('open', (id) => {
         isHost = true;
         myId = id;
@@ -62,7 +59,6 @@ function initHost(roomID, username) {
         hostControls.classList.remove('hidden');
         updateLobbyUI();
 
-        // Écoute des invités
         peer.on('connection', (conn) => {
             if(Object.keys(players).length >= MAX_PLAYERS) {
                 conn.send({ type: 'ERROR', msg: 'Room pleine (5 max)' });
@@ -103,7 +99,6 @@ function updateLobbyUI() {
     }
 }
 
-// Actions du joueur local
 readyBtn.addEventListener('click', () => {
     players[myId].isReady = !players[myId].isReady;
     readyBtn.innerText = players[myId].isReady ? "Prêt" : "Pas Prêt";
@@ -132,11 +127,11 @@ function handleDataFromGuest(peerId, data) {
         broadcast({ type: 'UPDATE_LOBBY', players: players });
         updateLobbyUI();
     } else if (data.type === 'UPDATE_LOBBY') {
-        players[peerId] = data.players[peerId];
+        players[peerId].isReady = data.players[peerId].isReady;
+        players[peerId].color = data.players[peerId].color;
         broadcast({ type: 'UPDATE_LOBBY', players: players });
         updateLobbyUI();
     } else if (data.type === 'INPUT') {
-        // Appliquer les inputs du joueur (ZQSD/Espace) à son body Matter.js
         applyInputs(peerId, data.keys);
     }
 }
@@ -149,7 +144,6 @@ function listenToHost() {
         } else if (data.type === 'START') {
             initGameEngine();
         } else if (data.type === 'SYNC_STATE') {
-            // Mettre à jour l'affichage côté client depuis les calculs de l'hôte
             renderGameState(data.state);
         }
     });
@@ -174,47 +168,95 @@ function initGameEngine() {
     const width = window.innerWidth;
     const height = window.innerHeight;
 
-    // Seulement l'hôte fait tourner la physique
     if (isHost) {
         engine = Matter.Engine.create();
         world = engine.world;
-        engine.gravity.y = 0.8; // Gravité légère mais réaliste
+        engine.gravity.y = 1.2; // Gravité un peu plus forte pour le ragdoll
 
-        // Création de la map (Sol/Lave et Plateformes)
-        const ground = Matter.Bodies.rectangle(width / 2, height - 20, width, 40, { isStatic: true, label: 'LAVA' });
-        const platform1 = Matter.Bodies.rectangle(width / 3, height - 200, 200, 20, { isStatic: true });
-        const platform2 = Matter.Bodies.rectangle((width / 3) * 2, height - 300, 200, 20, { isStatic: true });
-        
-        Matter.Composite.add(world, [ground, platform1, platform2]);
+        // 1. La grande plateforme centrale (80% de la largeur)
+        const platformWidth = width * 0.8;
+        const mainPlatform = Matter.Bodies.rectangle(width / 2, height - 150, platformWidth, 40, { 
+            isStatic: true, 
+            friction: 0.8,
+            label: 'GROUND' 
+        });
 
-        // Créer les joueurs
-        let startX = 100;
+        // 2. La Lave (Sensor qui couvre tout le bas)
+        const lava = Matter.Bodies.rectangle(width / 2, height - 20, width * 2, 100, { 
+            isStatic: true, 
+            isSensor: true, // Ne bloque pas physiquement, mais déclenche les collisions
+            label: 'LAVA' 
+        });
+
+        Matter.Composite.add(world, [mainPlatform, lava]);
+
+        // Créer les joueurs (Ragdolls)
+        let startX = width / 2 - ((Object.keys(players).length * 80) / 2);
         for (let id in players) {
-            players[id].body = Matter.Bodies.rectangle(startX, 100, 40, 80, {
-                restitution: 0, // Pas de rebond
-                friction: 0.05,
-                inertia: Infinity, // Empêche la rotation (Stickman reste droit)
-                label: `PLAYER_${id}`
-            });
-            Matter.Composite.add(world, players[id].body);
-            startX += 100;
+            players[id].ragdoll = createRagdoll(startX, height - 300, id);
+            Matter.Composite.add(world, players[id].ragdoll.composite);
+            startX += 80;
         }
 
-        // Boucle du serveur (Hôte) : Calcule la physique et envoie l'état
+        // Gestion des morts dans la lave
+        Matter.Events.on(engine, 'collisionStart', (event) => {
+            event.pairs.forEach((pair) => {
+                if (pair.bodyA.label === 'LAVA' || pair.bodyB.label === 'LAVA') {
+                    const victim = pair.bodyA.label === 'LAVA' ? pair.bodyB : pair.bodyA;
+                    if (victim.label.startsWith('PLAYER_') || victim.label.startsWith('HEAD_')) {
+                        const playerId = victim.label.split('_')[1];
+                        respawnPlayer(playerId);
+                    }
+                }
+            });
+        });
+
+        // Boucle Serveur
         setInterval(() => {
             Matter.Engine.update(engine, 1000 / 60);
-            applyInputs(myId, KEYS); // Appliquer les inputs de l'hôte
-            syncState(); // Envoyer aux clients
-            // Ici, tu pourras ajouter la logique de spawn des objets qui tombent du plafond
+            applyInputs(myId, KEYS); 
+            syncState(); 
         }, 1000 / 60);
     }
 
-    // Gestion des inputs pour tous
     window.addEventListener('keydown', (e) => handleKey(e, true));
     window.addEventListener('keyup', (e) => handleKey(e, false));
     
-    // Rendu local (Hôte et Invités dessinent via HTML5 Canvas)
     requestAnimationFrame(renderLoop);
+}
+
+// Construction du Ragdoll
+function createRagdoll(x, y, id) {
+    const group = Matter.Body.nextGroup(true); // Empêche les membres du même joueur de se percuter
+    const opt = { friction: 0.8, restitution: 0.1, collisionFilter: { group: group }, label: `PLAYER_${id}` };
+    const headOpt = { friction: 0.5, restitution: 0.4, collisionFilter: { group: group }, label: `HEAD_${id}` };
+
+    const head = Matter.Bodies.circle(x, y - 40, 18, headOpt);
+    const torso = Matter.Bodies.rectangle(x, y, 15, 45, opt);
+    const leftArm = Matter.Bodies.rectangle(x - 15, y - 10, 8, 30, opt);
+    const rightArm = Matter.Bodies.rectangle(x + 15, y - 10, 8, 30, opt);
+    const leftLeg = Matter.Bodies.rectangle(x - 8, y + 35, 10, 35, opt);
+    const rightLeg = Matter.Bodies.rectangle(x + 8, y + 35, 10, 35, opt);
+
+    // Articulations
+    const constraints = [
+        Matter.Constraint.create({ bodyA: head, bodyB: torso, pointA: { x: 0, y: 18 }, pointB: { x: 0, y: -22 }, stiffness: 0.8, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: leftArm, pointA: { x: -10, y: -15 }, pointB: { x: 0, y: -10 }, stiffness: 0.6, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: rightArm, pointA: { x: 10, y: -15 }, pointB: { x: 0, y: -10 }, stiffness: 0.6, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: leftLeg, pointA: { x: -7, y: 22 }, pointB: { x: 0, y: -15 }, stiffness: 0.8, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: rightLeg, pointA: { x: 7, y: 22 }, pointB: { x: 0, y: -15 }, stiffness: 0.8, length: 0 })
+    ];
+
+    const composite = Matter.Composite.create();
+    Matter.Composite.add(composite, [head, torso, leftArm, rightArm, leftLeg, rightLeg, ...constraints]);
+    
+    // Garder le torse droit pour ne pas qu'il tombe comme une crêpe
+    Matter.Events.on(engine, 'beforeUpdate', () => {
+        // Force le torse à rester vertical
+        Matter.Body.setAngle(torso, torso.angle * 0.8);
+    });
+
+    return { composite, mainBody: torso, head, leftArm, rightArm, leftLeg, rightLeg };
 }
 
 function handleKey(e, isDown) {
@@ -226,49 +268,64 @@ function handleKey(e, isDown) {
     if (key === ' ') KEYS.space = isDown;
     if (key === 'control') KEYS.ctrl = isDown;
 
-    if (!isHost) {
-        broadcast({ type: 'INPUT', keys: KEYS });
-    }
+    if (!isHost) broadcast({ type: 'INPUT', keys: KEYS });
 }
 
-// Fonction de l'Hôte pour appliquer la physique selon les touches
 function applyInputs(id, keys) {
-    const body = players[id]?.body;
-    if (!body) return;
+    const ragdoll = players[id]?.ragdoll;
+    if (!ragdoll) return;
+    const body = ragdoll.mainBody;
+    const force = 0.005;
 
-    const speed = 5;
-    const jumpForce = 0.05;
-
-    // Déplacement
-    if (keys.a) Matter.Body.setVelocity(body, { x: -speed, y: body.velocity.y });
-    if (keys.d) Matter.Body.setVelocity(body, { x: speed, y: body.velocity.y });
+    // Déplacement : Appliquer une force latérale
+    if (keys.a) Matter.Body.applyForce(body, body.position, { x: -force, y: 0 });
+    if (keys.d) Matter.Body.applyForce(body, body.position, { x: force, y: 0 });
     
-    // Glissade (Ctrl + Direction)
-    if (keys.ctrl && keys.a) Matter.Body.setVelocity(body, { x: -speed * 1.5, y: body.velocity.y });
-    if (keys.ctrl && keys.d) Matter.Body.setVelocity(body, { x: speed * 1.5, y: body.velocity.y });
-
-    // Saut
-    // (Dans un jeu complet, vérifier que la vélocité Y est ~0 pour éviter le double saut)
-    if (keys.space && Math.abs(body.velocity.y) < 0.5) {
-        Matter.Body.applyForce(body, body.position, { x: 0, y: -jumpForce });
+    // Saut : Appliquer une force vers le haut si on ne tombe pas trop vite
+    if (keys.space && Math.abs(body.velocity.y) < 1) {
+        Matter.Body.applyForce(body, body.position, { x: 0, y: -0.05 });
     }
 }
 
-// L'Hôte compile l'état de la map et l'envoie
+function respawnPlayer(id) {
+    const ragdoll = players[id].ragdoll;
+    if (!ragdoll) return;
+
+    // Réinitialiser la vélocité de tous les membres
+    ragdoll.composite.bodies.forEach(b => {
+        Matter.Body.setVelocity(b, { x: 0, y: 0 });
+        Matter.Body.setAngularVelocity(b, 0);
+    });
+
+    // Déplacer l'ensemble du composite vers le point de spawn
+    const spawnX = window.innerWidth / 2;
+    const spawnY = window.innerHeight - 300;
+    const offsetX = spawnX - ragdoll.mainBody.position.x;
+    const offsetY = spawnY - ragdoll.mainBody.position.y;
+    
+    Matter.Composite.translate(ragdoll.composite, { x: offsetX, y: offsetY });
+}
+
+// L'Hôte extrait les positions de tous les membres pour les envoyer
 function syncState() {
     let state = { p: {} };
     for (let id in players) {
+        const r = players[id].ragdoll;
         state.p[id] = {
-            x: players[id].body.position.x,
-            y: players[id].body.position.y,
-            c: players[id].color
+            c: players[id].color,
+            h: { x: r.head.position.x, y: r.head.position.y, a: r.head.angle, w: 18, r: true }, // r = isRound
+            t: { x: r.mainBody.position.x, y: r.mainBody.position.y, a: r.mainBody.angle, w: 15, h: 45 },
+            la: { x: r.leftArm.position.x, y: r.leftArm.position.y, a: r.leftArm.angle, w: 8, h: 30 },
+            ra: { x: r.rightArm.position.x, y: r.rightArm.position.y, a: r.rightArm.angle, w: 8, h: 30 },
+            ll: { x: r.leftLeg.position.x, y: r.leftLeg.position.y, a: r.leftLeg.angle, w: 10, h: 35 },
+            rl: { x: r.rightLeg.position.x, y: r.rightLeg.position.y, a: r.rightLeg.angle, w: 10, h: 35 }
         };
     }
     broadcast({ type: 'SYNC_STATE', state: state });
-    renderGameState(state); // L'hôte se met à jour lui-même visuellement
+    renderGameState(state); 
 }
 
-// L'état visuel du jeu (dessiné sur le Canvas par tout le monde)
+// === RENDU GRAPHIQUE (CANVAS) ===
 let currentState = null;
 function renderGameState(state) {
     currentState = state;
@@ -282,23 +339,45 @@ function renderLoop() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Dessin du décor statique (hardcodé pour la démo, à synchroniser si dynamique)
+    // Décor
     ctx.fillStyle = '#ff4444'; // Lave
-    ctx.fillRect(0, canvas.height - 40, canvas.width, 40);
+    ctx.fillRect(0, canvas.height - 70, canvas.width, 100);
     
-    ctx.fillStyle = '#888'; // Plateformes
-    ctx.fillRect(canvas.width / 3 - 100, canvas.height - 210, 200, 20);
-    ctx.fillRect((canvas.width / 3) * 2 - 100, canvas.height - 310, 200, 20);
+    ctx.fillStyle = '#888'; // Plateforme Centrale
+    ctx.fillRect(canvas.width * 0.1, canvas.height - 170, canvas.width * 0.8, 40);
 
-    // Dessin des joueurs
+    // Joueurs
     if (currentState && currentState.p) {
         for (let id in currentState.p) {
             const p = currentState.p[id];
-            ctx.fillStyle = p.c;
-            // On dessine le body (40x80) centré sur sa position X/Y
-            ctx.fillRect(p.x - 20, p.y - 40, 40, 80); 
+            ctx.fillStyle = p.c; // Couleur du joueur
+
+            // Dessiner chaque membre
+            drawPart(ctx, p.t);  // Torse
+            drawPart(ctx, p.la); // Bras Gauche
+            drawPart(ctx, p.ra); // Bras Droit
+            drawPart(ctx, p.ll); // Jambe Gauche
+            drawPart(ctx, p.rl); // Jambe Droite
+            drawPart(ctx, p.h);  // Tête
         }
     }
 
     requestAnimationFrame(renderLoop);
+}
+
+// Fonction utilitaire pour dessiner un rectangle ou un cercle pivoté
+function drawPart(ctx, part) {
+    ctx.save();
+    ctx.translate(part.x, part.y);
+    ctx.rotate(part.a);
+    if (part.r) {
+        // C'est la tête (cercle)
+        ctx.beginPath();
+        ctx.arc(0, 0, part.w, 0, 2 * Math.PI);
+        ctx.fill();
+    } else {
+        // C'est un membre (rectangle)
+        ctx.fillRect(-part.w / 2, -part.h / 2, part.w, part.h);
+    }
+    ctx.restore();
 }
