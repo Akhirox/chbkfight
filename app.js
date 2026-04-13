@@ -10,16 +10,20 @@ const readyBtn = document.getElementById('ready-btn');
 const startGameBtn = document.getElementById('start-game-btn');
 const hostControls = document.getElementById('host-controls');
 
+// === CONFIGURATION DU JEU ===
+const MAX_PLAYERS = 5;
+const V_WIDTH = 1600;  // Résolution virtuelle (Largeur)
+const V_HEIGHT = 900;  // Résolution virtuelle (Hauteur)
+
 // === ÉTATS DU JEU ===
 let peer;
-let connections = []; // Utilisé par l'hôte pour stocker les clients
-let hostConnection; // Utilisé par le client pour parler à l'hôte
+let connections = []; 
+let hostConnection; 
 let isHost = false;
 let myId = '';
-let players = {}; // { id: { name, color, isReady, ragdoll: { composite, mainBody... } } }
-
-// Configurations
-const MAX_PLAYERS = 5;
+let players = {}; 
+let currentState = null; // L'état global du jeu reçu par tous
+const KEYS = { w: false, a: false, s: false, d: false, space: false, ctrl: false };
 
 // === INITIALISATION RÉSEAU (PEERJS) ===
 joinBtn.addEventListener('click', () => {
@@ -54,7 +58,7 @@ function initHost(roomID, username) {
     peer.on('open', (id) => {
         isHost = true;
         myId = id;
-        players[myId] = { name: username, color: '#ff0000', isReady: false };
+        players[myId] = { name: username, color: '#ff0000', isReady: false, inputs: { ...KEYS } };
         setupLobby(roomID, username);
         hostControls.classList.remove('hidden');
         updateLobbyUI();
@@ -92,10 +96,8 @@ function updateLobbyUI() {
         if (!p.isReady) allReady = false;
     }
 
-    if (isHost && playerCount > 1 && allReady) {
-        startGameBtn.disabled = false;
-    } else if (isHost) {
-        startGameBtn.disabled = true;
+    if (isHost) {
+        startGameBtn.disabled = !(playerCount > 1 && allReady);
     }
 }
 
@@ -123,7 +125,7 @@ function broadcast(data) {
 
 function handleDataFromGuest(peerId, data) {
     if (data.type === 'JOIN') {
-        players[peerId] = { name: data.name, color: data.color, isReady: false };
+        players[peerId] = { name: data.name, color: data.color, isReady: false, inputs: { ...KEYS } };
         broadcast({ type: 'UPDATE_LOBBY', players: players });
         updateLobbyUI();
     } else if (data.type === 'UPDATE_LOBBY') {
@@ -132,7 +134,7 @@ function handleDataFromGuest(peerId, data) {
         broadcast({ type: 'UPDATE_LOBBY', players: players });
         updateLobbyUI();
     } else if (data.type === 'INPUT') {
-        applyInputs(peerId, data.keys);
+        players[peerId].inputs = data.keys; // Stocker les inputs de l'invité
     }
 }
 
@@ -142,14 +144,14 @@ function listenToHost() {
             players = data.players;
             updateLobbyUI();
         } else if (data.type === 'START') {
-            initGameEngine();
+            initGameEngine(); // Lancer le moteur visuel côté invité
         } else if (data.type === 'SYNC_STATE') {
-            renderGameState(data.state);
+            currentState = data.state; // Mettre à jour l'état visuel
         }
     });
 }
 
-// === MOTEUR PHYSIQUE ET JEU (MATTER.JS) ===
+// === MOTEUR PHYSIQUE ET JEU (MATTER.JS - HÔTE SEULEMENT) ===
 startGameBtn.addEventListener('click', () => {
     if (isHost) {
         broadcast({ type: 'START' });
@@ -157,48 +159,43 @@ startGameBtn.addEventListener('click', () => {
     }
 });
 
-let engine, render, world;
-const KEYS = { w: false, a: false, s: false, d: false, space: false, ctrl: false };
+let engine, world;
 
 function initGameEngine() {
     uiContainer.classList.add('hidden');
     gameContainer.classList.remove('hidden');
 
-    const canvas = document.getElementById('game-canvas');
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-
     if (isHost) {
         engine = Matter.Engine.create();
         world = engine.world;
-        engine.gravity.y = 1.2; // Gravité un peu plus forte pour le ragdoll
+        engine.gravity.y = 1.2; 
 
-        // 1. La grande plateforme centrale (80% de la largeur)
-        const platformWidth = width * 0.8;
-        const mainPlatform = Matter.Bodies.rectangle(width / 2, height - 150, platformWidth, 40, { 
+        // 1. La grande plateforme centrale
+        const platformWidth = V_WIDTH * 0.7; // 70% de la largeur
+        const mainPlatform = Matter.Bodies.rectangle(V_WIDTH / 2, V_HEIGHT - 100, platformWidth, 40, { 
             isStatic: true, 
             friction: 0.8,
             label: 'GROUND' 
         });
 
-        // 2. La Lave (Sensor qui couvre tout le bas)
-        const lava = Matter.Bodies.rectangle(width / 2, height - 20, width * 2, 100, { 
+        // 2. La Lave (Sensor en bas couvrant toute la largeur)
+        const lava = Matter.Bodies.rectangle(V_WIDTH / 2, V_HEIGHT - 20, V_WIDTH, 100, { 
             isStatic: true, 
-            isSensor: true, // Ne bloque pas physiquement, mais déclenche les collisions
+            isSensor: true, 
             label: 'LAVA' 
         });
 
         Matter.Composite.add(world, [mainPlatform, lava]);
 
         // Créer les joueurs (Ragdolls)
-        let startX = width / 2 - ((Object.keys(players).length * 80) / 2);
+        let startX = (V_WIDTH / 2) - ((Object.keys(players).length * 100) / 2);
         for (let id in players) {
-            players[id].ragdoll = createRagdoll(startX, height - 300, id);
+            players[id].ragdoll = createRagdoll(startX, V_HEIGHT - 300, id);
             Matter.Composite.add(world, players[id].ragdoll.composite);
-            startX += 80;
+            startX += 100;
         }
 
-        // Gestion des morts dans la lave
+        // Gestion des collisions mortelles (Lave)
         Matter.Events.on(engine, 'collisionStart', (event) => {
             event.pairs.forEach((pair) => {
                 if (pair.bodyA.label === 'LAVA' || pair.bodyB.label === 'LAVA') {
@@ -211,49 +208,55 @@ function initGameEngine() {
             });
         });
 
-        // Boucle Serveur
+        // Main Loop du Serveur
         setInterval(() => {
             Matter.Engine.update(engine, 1000 / 60);
-            applyInputs(myId, KEYS); 
+            
+            // Appliquer les inputs pour chaque joueur
+            for (let id in players) {
+                const pKeys = (id === myId) ? KEYS : players[id].inputs;
+                applyInputs(id, pKeys); 
+            }
+            
             syncState(); 
         }, 1000 / 60);
     }
 
+    // Gestion des touches pour tous
     window.addEventListener('keydown', (e) => handleKey(e, true));
     window.addEventListener('keyup', (e) => handleKey(e, false));
     
+    // Démarrer la boucle d'affichage
     requestAnimationFrame(renderLoop);
 }
 
 // Construction du Ragdoll
 function createRagdoll(x, y, id) {
-    const group = Matter.Body.nextGroup(true); // Empêche les membres du même joueur de se percuter
+    const group = Matter.Body.nextGroup(true); 
     const opt = { friction: 0.8, restitution: 0.1, collisionFilter: { group: group }, label: `PLAYER_${id}` };
     const headOpt = { friction: 0.5, restitution: 0.4, collisionFilter: { group: group }, label: `HEAD_${id}` };
 
-    const head = Matter.Bodies.circle(x, y - 40, 18, headOpt);
-    const torso = Matter.Bodies.rectangle(x, y, 15, 45, opt);
+    const head = Matter.Bodies.circle(x, y - 40, 20, headOpt);
+    const torso = Matter.Bodies.rectangle(x, y, 15, 50, opt);
     const leftArm = Matter.Bodies.rectangle(x - 15, y - 10, 8, 30, opt);
     const rightArm = Matter.Bodies.rectangle(x + 15, y - 10, 8, 30, opt);
     const leftLeg = Matter.Bodies.rectangle(x - 8, y + 35, 10, 35, opt);
     const rightLeg = Matter.Bodies.rectangle(x + 8, y + 35, 10, 35, opt);
 
-    // Articulations
     const constraints = [
-        Matter.Constraint.create({ bodyA: head, bodyB: torso, pointA: { x: 0, y: 18 }, pointB: { x: 0, y: -22 }, stiffness: 0.8, length: 0 }),
-        Matter.Constraint.create({ bodyA: torso, bodyB: leftArm, pointA: { x: -10, y: -15 }, pointB: { x: 0, y: -10 }, stiffness: 0.6, length: 0 }),
-        Matter.Constraint.create({ bodyA: torso, bodyB: rightArm, pointA: { x: 10, y: -15 }, pointB: { x: 0, y: -10 }, stiffness: 0.6, length: 0 }),
-        Matter.Constraint.create({ bodyA: torso, bodyB: leftLeg, pointA: { x: -7, y: 22 }, pointB: { x: 0, y: -15 }, stiffness: 0.8, length: 0 }),
-        Matter.Constraint.create({ bodyA: torso, bodyB: rightLeg, pointA: { x: 7, y: 22 }, pointB: { x: 0, y: -15 }, stiffness: 0.8, length: 0 })
+        Matter.Constraint.create({ bodyA: head, bodyB: torso, pointA: { x: 0, y: 20 }, pointB: { x: 0, y: -25 }, stiffness: 0.8, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: leftArm, pointA: { x: -10, y: -20 }, pointB: { x: 0, y: -10 }, stiffness: 0.6, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: rightArm, pointA: { x: 10, y: -20 }, pointB: { x: 0, y: -10 }, stiffness: 0.6, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: leftLeg, pointA: { x: -7, y: 25 }, pointB: { x: 0, y: -15 }, stiffness: 0.8, length: 0 }),
+        Matter.Constraint.create({ bodyA: torso, bodyB: rightLeg, pointA: { x: 7, y: 25 }, pointB: { x: 0, y: -15 }, stiffness: 0.8, length: 0 })
     ];
 
     const composite = Matter.Composite.create();
     Matter.Composite.add(composite, [head, torso, leftArm, rightArm, leftLeg, rightLeg, ...constraints]);
     
-    // Garder le torse droit pour ne pas qu'il tombe comme une crêpe
+    // Maintenir le joueur droit
     Matter.Events.on(engine, 'beforeUpdate', () => {
-        // Force le torse à rester vertical
-        Matter.Body.setAngle(torso, torso.angle * 0.8);
+        Matter.Body.setAngle(torso, torso.angle * 0.8); 
     });
 
     return { composite, mainBody: torso, head, leftArm, rightArm, leftLeg, rightLeg };
@@ -275,15 +278,29 @@ function applyInputs(id, keys) {
     const ragdoll = players[id]?.ragdoll;
     if (!ragdoll) return;
     const body = ragdoll.mainBody;
-    const force = 0.005;
+    const moveForce = 0.008;
 
-    // Déplacement : Appliquer une force latérale
-    if (keys.a) Matter.Body.applyForce(body, body.position, { x: -force, y: 0 });
-    if (keys.d) Matter.Body.applyForce(body, body.position, { x: force, y: 0 });
+    // Déplacement global (Torse)
+    if (keys.a) Matter.Body.applyForce(body, body.position, { x: -moveForce, y: 0 });
+    if (keys.d) Matter.Body.applyForce(body, body.position, { x: moveForce, y: 0 });
     
-    // Saut : Appliquer une force vers le haut si on ne tombe pas trop vite
+    // Animation procédurale de course (Mouvement des jambes)
+    if (keys.a || keys.d) {
+        const time = Date.now() * 0.015; // Fréquence de course
+        const legForce = 0.003;
+        
+        // Pousser les jambes en opposition avec un sinus
+        Matter.Body.applyForce(ragdoll.leftLeg, ragdoll.leftLeg.position, { 
+            x: Math.sin(time) * legForce, y: 0 
+        });
+        Matter.Body.applyForce(ragdoll.rightLeg, ragdoll.rightLeg.position, { 
+            x: -Math.sin(time) * legForce, y: 0 
+        });
+    }
+
+    // Saut
     if (keys.space && Math.abs(body.velocity.y) < 1) {
-        Matter.Body.applyForce(body, body.position, { x: 0, y: -0.05 });
+        Matter.Body.applyForce(body, body.position, { x: 0, y: -0.06 });
     }
 }
 
@@ -291,92 +308,94 @@ function respawnPlayer(id) {
     const ragdoll = players[id].ragdoll;
     if (!ragdoll) return;
 
-    // Réinitialiser la vélocité de tous les membres
     ragdoll.composite.bodies.forEach(b => {
         Matter.Body.setVelocity(b, { x: 0, y: 0 });
         Matter.Body.setAngularVelocity(b, 0);
     });
 
-    // Déplacer l'ensemble du composite vers le point de spawn
-    const spawnX = window.innerWidth / 2;
-    const spawnY = window.innerHeight - 300;
-    const offsetX = spawnX - ragdoll.mainBody.position.x;
-    const offsetY = spawnY - ragdoll.mainBody.position.y;
+    const offsetX = (V_WIDTH / 2) - ragdoll.mainBody.position.x;
+    const offsetY = (V_HEIGHT - 400) - ragdoll.mainBody.position.y;
     
     Matter.Composite.translate(ragdoll.composite, { x: offsetX, y: offsetY });
 }
 
-// L'Hôte extrait les positions de tous les membres pour les envoyer
+// Compilateur d'état de l'Hôte
 function syncState() {
     let state = { p: {} };
     for (let id in players) {
         const r = players[id].ragdoll;
-        state.p[id] = {
-            c: players[id].color,
-            h: { x: r.head.position.x, y: r.head.position.y, a: r.head.angle, w: 18, r: true }, // r = isRound
-            t: { x: r.mainBody.position.x, y: r.mainBody.position.y, a: r.mainBody.angle, w: 15, h: 45 },
-            la: { x: r.leftArm.position.x, y: r.leftArm.position.y, a: r.leftArm.angle, w: 8, h: 30 },
-            ra: { x: r.rightArm.position.x, y: r.rightArm.position.y, a: r.rightArm.angle, w: 8, h: 30 },
-            ll: { x: r.leftLeg.position.x, y: r.leftLeg.position.y, a: r.leftLeg.angle, w: 10, h: 35 },
-            rl: { x: r.rightLeg.position.x, y: r.rightLeg.position.y, a: r.rightLeg.angle, w: 10, h: 35 }
-        };
+        if(r) {
+            state.p[id] = {
+                c: players[id].color,
+                h: { x: r.head.position.x, y: r.head.position.y, a: r.head.angle, w: 20, r: true }, 
+                t: { x: r.mainBody.position.x, y: r.mainBody.position.y, a: r.mainBody.angle, w: 15, h: 50 },
+                la: { x: r.leftArm.position.x, y: r.leftArm.position.y, a: r.leftArm.angle, w: 8, h: 30 },
+                ra: { x: r.rightArm.position.x, y: r.rightArm.position.y, a: r.rightArm.angle, w: 8, h: 30 },
+                ll: { x: r.leftLeg.position.x, y: r.leftLeg.position.y, a: r.leftLeg.angle, w: 10, h: 35 },
+                rl: { x: r.rightLeg.position.x, y: r.rightLeg.position.y, a: r.rightLeg.angle, w: 10, h: 35 }
+            };
+        }
     }
     broadcast({ type: 'SYNC_STATE', state: state });
-    renderGameState(state); 
+    currentState = state; // L'Hôte se met à jour lui-même
 }
 
-// === RENDU GRAPHIQUE (CANVAS) ===
-let currentState = null;
-function renderGameState(state) {
-    currentState = state;
-}
-
+// === RENDU GRAPHIQUE (CANVAS - COMMUN À TOUS) ===
 function renderLoop() {
     const canvas = document.getElementById('game-canvas');
     const ctx = canvas.getContext('2d');
+    
+    // Adaptation à la taille de l'écran en conservant le ratio
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
+    const scale = Math.min(canvas.width / V_WIDTH, canvas.height / V_HEIGHT);
+    const offsetX = (canvas.width - (V_WIDTH * scale)) / 2;
+    const offsetY = (canvas.height - (V_HEIGHT * scale)) / 2;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Décor
-    ctx.fillStyle = '#ff4444'; // Lave
-    ctx.fillRect(0, canvas.height - 70, canvas.width, 100);
     
-    ctx.fillStyle = '#888'; // Plateforme Centrale
-    ctx.fillRect(canvas.width * 0.1, canvas.height - 170, canvas.width * 0.8, 40);
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(scale, scale); 
 
-    // Joueurs
+    // Dessin du décor (Utilisation des coordonnées virtuelles V_WIDTH / V_HEIGHT)
+    ctx.fillStyle = '#ff4444'; // Lave
+    ctx.fillRect(0, V_HEIGHT - 70, V_WIDTH, 100);
+    
+    ctx.fillStyle = '#888'; // Plateforme
+    ctx.fillRect(V_WIDTH * 0.15, V_HEIGHT - 120, V_WIDTH * 0.7, 40);
+
+    // Dessin des joueurs
     if (currentState && currentState.p) {
         for (let id in currentState.p) {
             const p = currentState.p[id];
-            ctx.fillStyle = p.c; // Couleur du joueur
+            if (!p || !p.t) continue; // Sécurité si le chargement n'est pas complet
 
-            // Dessiner chaque membre
-            drawPart(ctx, p.t);  // Torse
-            drawPart(ctx, p.la); // Bras Gauche
-            drawPart(ctx, p.ra); // Bras Droit
-            drawPart(ctx, p.ll); // Jambe Gauche
-            drawPart(ctx, p.rl); // Jambe Droite
-            drawPart(ctx, p.h);  // Tête
+            ctx.fillStyle = p.c; 
+
+            drawPart(ctx, p.t);  
+            drawPart(ctx, p.la); 
+            drawPart(ctx, p.ra); 
+            drawPart(ctx, p.ll); 
+            drawPart(ctx, p.rl); 
+            drawPart(ctx, p.h);  
         }
     }
 
+    ctx.restore();
     requestAnimationFrame(renderLoop);
 }
 
-// Fonction utilitaire pour dessiner un rectangle ou un cercle pivoté
 function drawPart(ctx, part) {
+    if(!part) return;
     ctx.save();
     ctx.translate(part.x, part.y);
     ctx.rotate(part.a);
     if (part.r) {
-        // C'est la tête (cercle)
         ctx.beginPath();
         ctx.arc(0, 0, part.w, 0, 2 * Math.PI);
         ctx.fill();
     } else {
-        // C'est un membre (rectangle)
         ctx.fillRect(-part.w / 2, -part.h / 2, part.w, part.h);
     }
     ctx.restore();
