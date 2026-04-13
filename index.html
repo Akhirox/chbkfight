@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHBK Fight</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+</head>
+<body>
+    <div id="ui-container">
+        <h1>CHBK Fight</h1>
+        
+        <div id="login-screen">
+            <input type="text" id="username" placeholder="Entrez votre pseudo" maxlength="15">
+            <select id="room-select">
+                <option value="chbkfightinggame1">Room 1</option>
+                <option value="chbkfightinggame2">Room 2</option>
+                <option value="chbkfightinggame3">Room 3</option>
+            </select>
+            <button id="join-btn">Rejoindre / Créer</button>
+            <p id="connection-status"></p>
+        </div>
+
+        <div id="lobby-screen" class="hidden">
+            <h2>Lobby : <span id="lobby-room-name"></span></h2>
+            <p>Rôle : <span id="player-role"></span></p>
+            
+            <div class="lobby-controls">
+                <label>Couleur du Stickman :
+                    <input type="color" id="player-color" value="#ff0000">
+                </label>
+                <button id="ready-btn">Pas Prêt</button>
+            </div>
+
+            <div id="host-controls" class="hidden">
+                <label>Manches pour gagner :
+                    <input type="number" id="rounds-input" value="3" min="1" max="10">
+                </label>
+                <button id="start-game-btn" disabled>Lancer la partie (Tous les joueurs doivent être prêts)</button>
+            </div>
+
+            <ul id="players-list"></ul>
+        </div>
+    </div>
+
+    <div id="game-container" class="hidden">
+        <canvas id="game-canvas"></canvas>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
